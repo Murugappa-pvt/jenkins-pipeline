@@ -1,0 +1,60 @@
+pipeline {
+    agent any
+
+    environment {
+        name = 'Ankit'
+    }
+
+    parameters {
+        string(name: 'company', defaultValue: 'CloudContainer Technologies', description: '')
+        choice(name: 'City', choices: ['Gopalganj', 'Bihar', 'Bihar'], description: '')
+    }
+
+    stages {
+        stage('Cloning') {
+            steps {
+                sh 'mkdir /tmp/clone'
+                sh 'ls -lrth /tmp'
+            }
+        }
+
+        stage('Building Artifacts') {
+            steps {
+                sh '''
+                    mkdir /tmp/build
+                    ls -lrth /tmp
+                    echo "your company is ${company}"
+                '''
+            }
+        }
+
+        stage('Call Environment Variables') {
+            steps {
+                sh 'echo "your name is ${name}"'
+            }
+        }
+
+        stage('Deploy to SIT') {
+            steps {
+                echo 'Deploying in SIT environment'
+            }
+        }
+
+        stage('Continue') {
+            input {
+                message "Should we continue?"
+                ok "Yes we should"
+            }
+            steps {
+                echo 'Go ahead for production deployment'
+            }
+        }
+
+        stage('Deploy to PROD') {
+            steps {
+                echo 'Deploying in PROD environment'
+            }
+        }
+    }
+}
+
