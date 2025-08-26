@@ -1,0 +1,100 @@
+peline {
+  agent any
+
+  parameters {
+    string(name: 'AWS_REGION', defaultValue: 'ap-south-1', description: 'AWS region')
+    string(name: 'EC2_KEY_NAME', defaultValue: 'jenkins-key', description: 'Existing AWS KeyPair name')
+    string(name: 'ECR_REPO', defaultValue: 'demo-app', description: 'ECR repository name')
+    string(name: 'IMAGE_NAME', defaultValue: 'demo-app', description: 'Docker image name')
+    string(name: 'IMAGE_TAG', defaultValue: 'v${BUILD_NUMBER}', description: 'Docker image tag')
+  }
+
+  environment {
+    TF_IN_AUTOMATION = 'true'
+    TF_INPUT = 'false'
+  }
+
+  stages {
+    stage('Checkout Code') {
+      steps {
+        checkout scm
+      }
+    }
+
+    stage('Terraform Init & Apply') {
+      steps {
+        dir('infra') {
+          withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+            sh '''
+              terraform init -upgrade
+              terraform apply -auto-approve \
+                -var="region=${AWS_REGION}" \
+                -var="key_name=${EC2_KEY_NAME}"
+            '''
+            script {
+              env.BUILDER_IP = sh(returnStdout: true, script: 'terraform output -raw public_ip').trim()
+              echo "EC2 Builder IP: ${env.BUILDER_IP}"
+            }
+          }
+        }
+      }
+    }
+
+    stage('Copy Application to EC2') {
+      steps {
+        sshagent(credentials: ['ec2-ssh-key']) {
+          sh '''
+            ssh -o StrictHostKeyChecking=no ubuntu@${BUILDER_IP} "mkdir -p ~/app"
+            rsync -av --exclude '.git' ./ ubuntu@${BUILDER_IP}:~/app/
+          '''
+        }
+      }
+    }
+
+    stage('Build & Push Docker Image') {
+      steps {
+        sshagent(credentials: ['ec2-ssh-key']) {
+          withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+            sh '''
+              ssh -o StrictHostKeyChecking=no ubuntu@${BUILDER_IP} \
+              "cd ~/app && ./scripts/build_and_push.sh ${AWS_REGION} ${ECR_REPO} ${IMAGE_NAME} ${IMAGE_TAG}"
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Deploy to Kubernetes') {
+      steps {
+        withCredentials([file(credentialsId: 'kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+          sh '''
+            export KUBECONFIG=$KUBECONFIG_FILE
+            IMG_URI=$(aws ecr describe-repositories --repository-names ${ECR_REPO} --region ${AWS_REGION} --query 'repositories[0].repositoryUri' --output text)
+            IMAGE="$IMG_URI:${IMAGE_TAG}"
+
+            sed "s|__IMAGE__|$IMAGE|g" k8s/deployment.yaml | kubectl apply -f -
+            kubectl apply -f k8s/service.yaml
+            kubectl rollout status deploy/demo-app -n default --timeout=180s
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      echo "✅ Deployment successful!"
+    }
+    failure {
+      echo "❌ Deployment failed!"
+    }
+    cleanup {
+      dir('infra') {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'aws-creds']]) {
+          sh 'terraform destroy -auto-approve || true'
+        }
+      }
+    }
+  }
+}
+
